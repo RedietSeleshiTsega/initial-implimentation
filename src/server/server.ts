@@ -130,16 +130,28 @@ function findWordOccurrences(document: TextDocument, word: string): Location[] {
   const locations: Location[] = [];
   try {
     const text = document.getText();
-    // Use word boundaries to match exact word (not substring)
     // Escape special regex characters in the word
     const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Match word with word boundaries (whitespace, parentheses, brackets, etc.)
-    const regex = new RegExp(`\\b${escapedWord}\\b`, 'g');
+    // For Metta, match word boundaries: whitespace, parentheses, brackets, quotes, or start/end of line
+    // This handles S-expression syntax where symbols can be adjacent to parentheses
+    // Use a simpler pattern that matches the word when not part of a larger identifier
+    const boundaryChars = '[\\s()\\[\\]{}"\'\\`,]';
+    const regex = new RegExp('(?:^|' + boundaryChars + '|\\b)' + escapedWord + '(?:' + boundaryChars + '|\\b|$)', 'g');
     let match;
     
     while ((match = regex.exec(text)) !== null) {
-      const start = document.positionAt(match.index);
-      const end = document.positionAt(match.index + match[0].length);
+      // Find the actual start of the word (might be after a boundary character)
+      let wordStart = match.index;
+      const matchText = match[0];
+      
+      // Find where the actual word starts in the match
+      const wordIndexInMatch = matchText.indexOf(word);
+      if (wordIndexInMatch > 0) {
+        wordStart += wordIndexInMatch;
+      }
+      
+      const start = document.positionAt(wordStart);
+      const end = document.positionAt(wordStart + word.length);
       
       locations.push({
         uri: document.uri,
@@ -171,32 +183,11 @@ connection.onReferences((params: ReferenceParams): Location[] | null => {
     
     const locations: Location[] = [];
     
-    // If includeDeclaration is true, we should include the definition location
-    // For now, we'll search in all documents (or just current document)
-    // For a simple implementation, search only in the current document
-    // For workspace-wide search, iterate through all documents
-    
-    if (params.context.includeDeclaration) {
-      // Find all occurrences in the current document
-      const currentDocLocations = findWordOccurrences(document, word);
-      locations.push(...currentDocLocations);
-    } else {
-      // Find all references (excluding the declaration)
-      // For now, we'll include all occurrences
-      const currentDocLocations = findWordOccurrences(document, word);
-      locations.push(...currentDocLocations);
-    }
-    
-    // Optionally search in all open documents for workspace-wide references
-    // Uncomment the following to enable workspace-wide search:
-    /*
+    // Search in all open documents for workspace-wide references
     for (const doc of documents.all()) {
-      if (doc.uri !== document.uri) {
-        const docLocations = findWordOccurrences(doc, word);
-        locations.push(...docLocations);
-      }
+      const docLocations = findWordOccurrences(doc, word);
+      locations.push(...docLocations);
     }
-    */
     
     return locations;
   } catch (error) {
