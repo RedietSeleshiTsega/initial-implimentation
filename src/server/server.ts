@@ -3,214 +3,332 @@ import {
   TextDocuments,
   Diagnostic,
   DiagnosticSeverity,
-  Hover,
+  ProposedFeatures,
   InitializeParams,
   TextDocumentSyncKind,
+  InitializeResult,
+  Hover,
   Location,
-  ReferenceParams
+  ReferenceParams,
+  DocumentFormattingParams,
+  TextEdit,
+  Position,
+  Range
 } from "vscode-languageserver/node";
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-const connection = createConnection();
-const documents = new TextDocuments(TextDocument);
+console.error("=== METTA LANGUAGE SERVER STARTING ===");
+console.error("Process ID: " + process.pid);
+console.error("Node version: " + process.version);
 
-connection.onInitialize((_params: InitializeParams) => {
-  return {
+// Create a connection using all proposed features
+const connection = createConnection(ProposedFeatures.all);
+
+// Create document manager
+const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+
+// Initialize the server
+connection.onInitialize((params: InitializeParams) => {
+  console.error("=== SERVER INITIALIZING ===");
+  
+  const result: InitializeResult = {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
       hoverProvider: true,
-      referencesProvider: true
+      referencesProvider: true,
+      documentFormattingProvider: true
+    }
+  };
+  
+  console.error("Server capabilities registered:", JSON.stringify(result.capabilities, null, 2));
+  return result;
+});
+
+connection.onInitialized(() => {
+  console.error("=== SERVER INITIALIZED SUCCESSFULLY ===");
+  connection.console.log("Metta Language Server is ready!");
+});
+
+// FEATURE 1: Parenthesis Balance Checking
+documents.onDidChangeContent(change => {
+  console.error(`Checking document: ${change.document.uri}`);
+  validateDocument(change.document);
+});
+
+function validateDocument(textDocument: TextDocument): void {
+  const text = textDocument.getText();
+  const diagnostics: Diagnostic[] = [];
+
+  let balance = 0;
+  let firstError = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "(") {
+      balance++;
+    } else if (text[i] === ")") {
+      balance--;
+      if (balance < 0 && firstError === -1) {
+        firstError = i;
+        diagnostics.push({
+          severity: DiagnosticSeverity.Error,
+          range: {
+            start: textDocument.positionAt(i),
+            end: textDocument.positionAt(i + 1)
+          },
+          message: "Unmatched closing parenthesis",
+          source: "metta-ls"
+        });
+        break;
+      }
+    }
+  }
+
+  if (balance > 0) {
+    const end = text.length;
+    diagnostics.push({
+      severity: DiagnosticSeverity.Error,
+      range: {
+        start: textDocument.positionAt(Math.max(0, end - 1)),
+        end: textDocument.positionAt(end)
+      },
+      message: `Missing ${balance} closing parenthesis${balance > 1 ? "es" : ""}`,
+      source: "metta-ls"
+    });
+  }
+
+  console.error(`Found ${diagnostics.length} diagnostic(s)`);
+  connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
+}
+
+// FEATURE 2: Hover Provider
+connection.onHover((params): Hover | null => {
+  console.error(`Hover request at ${params.position.line}:${params.position.character}`);
+  
+  const document = documents.get(params.textDocument.uri);
+  if (!document) {
+    console.error("Document not found for hover");
+    return null;
+  }
+
+  const word = getWordAtPosition(document, params.position);
+  console.error(`Word at position: "${word}"`);
+  
+  if (!word) {
+    return {
+      contents: {
+        kind: "markdown",
+        value: "**Metta Language**\n\nHover over a symbol to see information."
+      }
+    };
+  }
+
+  const occurrences = findWordOccurrences(document, word);
+  console.error(`Found ${occurrences.length} occurrences of "${word}"`);
+
+  return {
+    contents: {
+      kind: "markdown",
+      value: `**Symbol:** \`${word}\`\n\nFound ${occurrences.length} occurrence${occurrences.length !== 1 ? "s" : ""} in this file.`
     }
   };
 });
 
-documents.onDidChangeContent(change => {
-  try {
-    const text = change.document.getText();
-    const diagnostics: Diagnostic[] = [];
-
-    let balance = 0;
-
-    for (let i = 0; i < text.length; i++) {
-      if (text[i] === "(") balance++;
-      if (text[i] === ")") balance--;
-
-      if (balance < 0) {
-        try {
-          diagnostics.push({
-            severity: DiagnosticSeverity.Error,
-            range: {
-              start: change.document.positionAt(i),
-              end: change.document.positionAt(i + 1)
-            },
-            message: "Unmatched closing parenthesis"
-          });
-        } catch (error) {
-          // If positionAt fails, skip this diagnostic
-          connection.console.error(`Error creating diagnostic at position ${i}: ${error}`);
-        }
-        break;
-      }
-    }
-
-    if (balance > 0) {
-      try {
-        const lastPos = Math.max(0, text.length - 1);
-        diagnostics.push({
-          severity: DiagnosticSeverity.Error,
-          range: {
-            start: change.document.positionAt(lastPos),
-            end: change.document.positionAt(text.length)
-          },
-          message: "Missing closing parenthesis"
-        });
-      } catch (error) {
-        // If positionAt fails, skip this diagnostic
-        connection.console.error(`Error creating diagnostic at end: ${error}`);
-      }
-    }
-
-    connection.sendDiagnostics({
-      uri: change.document.uri,
-      diagnostics
-    });
-  } catch (error) {
-    connection.console.error(`Error processing document change: ${error}`);
+// FEATURE 3: Find All References
+connection.onReferences((params: ReferenceParams): Location[] | null => {
+  console.error(`References request at ${params.position.line}:${params.position.character}`);
+  
+  const document = documents.get(params.textDocument.uri);
+  if (!document) {
+    console.error("Document not found for references");
+    return null;
   }
+
+  const word = getWordAtPosition(document, params.position);
+  if (!word) {
+    console.error("No word found at position");
+    return [];
+  }
+
+  console.error(`Finding references for: "${word}"`);
+  
+  const locations: Location[] = [];
+  
+  // Search in all open documents
+  for (const doc of documents.all()) {
+    const docLocations = findWordOccurrences(doc, word);
+    locations.push(...docLocations);
+  }
+
+  console.error(`Found ${locations.length} total references`);
+  return locations;
 });
 
-connection.onHover((params): Hover | null => {
-  try {
-    const document = documents.get(params.textDocument.uri);
-    if (!document) {
-      return null;
-    }
-    return {
-      contents: {
-        kind: "markdown",
-        value: "**Metta Symbol**\n\nThis is a placeholder hover."
-      }
-    };
-  } catch (error) {
-    connection.console.error(`Error handling hover: ${error}`);
-    return null;
+// FEATURE 4: Document Formatting
+connection.onDocumentFormatting((params: DocumentFormattingParams): TextEdit[] => {
+  console.error(`Format request for: ${params.textDocument.uri}`);
+  
+  const document = documents.get(params.textDocument.uri);
+  if (!document) {
+    console.error("Document not found for formatting");
+    return [];
   }
+
+  const text = document.getText();
+  const formatted = formatMettaCode(text);
+
+  console.error("Formatting complete");
+
+  return [
+    TextEdit.replace(
+      Range.create(
+        Position.create(0, 0),
+        document.positionAt(text.length)
+      ),
+      formatted
+    )
+  ];
 });
 
-// Helper function to extract the word/symbol at a given position
-function getWordAtPosition(document: TextDocument, position: { line: number; character: number }): string | null {
-  try {
-    const text = document.getText();
-    const offset = document.offsetAt(position);
-    
-    // Metta identifier pattern: alphanumeric, underscore, dash, and some special chars
-    // Word boundaries for Metta: whitespace, parentheses, brackets, quotes
-    const wordPattern = /[a-zA-Z0-9_\-$%&*+./:<=>?@^|~]+/g;
-    let match;
-    
-    while ((match = wordPattern.exec(text)) !== null) {
-      const start = match.index;
-      const end = start + match[0].length;
-      
-      if (offset >= start && offset <= end) {
-        return match[0];
-      }
+// Helper: Get word at cursor position
+function getWordAtPosition(document: TextDocument, position: Position): string | null {
+  const text = document.getText();
+  const offset = document.offsetAt(position);
+
+  // Metta identifier pattern
+  const wordPattern = /[a-zA-Z0-9_\-$%&*+./:<=>?@^|~!]+/g;
+  let match;
+
+  while ((match = wordPattern.exec(text)) !== null) {
+    if (offset >= match.index && offset <= match.index + match[0].length) {
+      return match[0];
     }
-    
-    return null;
-  } catch (error) {
-    connection.console.error(`Error extracting word at position: ${error}`);
-    return null;
   }
+
+  return null;
 }
 
-// Helper function to find all occurrences of a word in a document
+// Helper: Find all occurrences of a word
 function findWordOccurrences(document: TextDocument, word: string): Location[] {
   const locations: Location[] = [];
-  try {
-    const text = document.getText();
-    // Escape special regex characters in the word
-    const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // For Metta, match word boundaries: whitespace, parentheses, brackets, quotes, or start/end of line
-    // This handles S-expression syntax where symbols can be adjacent to parentheses
-    // Use a simpler pattern that matches the word when not part of a larger identifier
-    const boundaryChars = '[\\s()\\[\\]{}"\'\\`,]';
-    const regex = new RegExp('(?:^|' + boundaryChars + '|\\b)' + escapedWord + '(?:' + boundaryChars + '|\\b|$)', 'g');
-    let match;
-    
-    while ((match = regex.exec(text)) !== null) {
-      // Find the actual start of the word (might be after a boundary character)
-      let wordStart = match.index;
-      const matchText = match[0];
-      
-      // Find where the actual word starts in the match
-      const wordIndexInMatch = matchText.indexOf(word);
-      if (wordIndexInMatch > 0) {
-        wordStart += wordIndexInMatch;
-      }
-      
-      const start = document.positionAt(wordStart);
-      const end = document.positionAt(wordStart + word.length);
-      
-      locations.push({
-        uri: document.uri,
-        range: {
-          start,
-          end
-        }
-      });
-    }
-  } catch (error) {
-    connection.console.error(`Error finding word occurrences: ${error}`);
-  }
+  const text = document.getText();
+
+  // Escape special regex characters
+  const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   
+  // Word boundary pattern for Metta
+  const boundaryChars = "[\\s()\\[\\]{}\"'\\`,]";
+  const pattern = new RegExp(
+    `(?:^|${boundaryChars}|\\b)${escapedWord}(?:${boundaryChars}|\\b|$)`,
+    "g"
+  );
+
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    // Find actual word start
+    let wordStart = match.index;
+    const matchText = match[0];
+    const wordIndexInMatch = matchText.indexOf(word);
+    
+    if (wordIndexInMatch > 0) {
+      wordStart += wordIndexInMatch;
+    }
+
+    const start = document.positionAt(wordStart);
+    const end = document.positionAt(wordStart + word.length);
+
+    locations.push({
+      uri: document.uri,
+      range: { start, end }
+    });
+  }
+
   return locations;
 }
 
-connection.onReferences((params: ReferenceParams): Location[] | null => {
-  try {
-    const document = documents.get(params.textDocument.uri);
-    if (!document) {
-      return null;
+// Helper: Format Metta code
+function formatMettaCode(text: string): string {
+  const lines: string[] = [];
+  let currentLine = "";
+  let indentLevel = 0;
+  const indentSize = 2;
+  let inString = false;
+  let inComment = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const prevChar = i > 0 ? text[i - 1] : "";
+    const nextChar = i < text.length - 1 ? text[i + 1] : "";
+
+    // Handle strings
+    if (char === '"' && prevChar !== "\\") {
+      inString = !inString;
+      currentLine += char;
+      continue;
     }
-    
-    // Extract the word at the cursor position
-    const word = getWordAtPosition(document, params.position);
-    if (!word) {
-      return [];
+
+    if (inString) {
+      currentLine += char;
+      continue;
     }
-    
-    const locations: Location[] = [];
-    
-    // Search in all open documents for workspace-wide references
-    for (const doc of documents.all()) {
-      const docLocations = findWordOccurrences(doc, word);
-      locations.push(...docLocations);
+
+    // Handle comments
+    if (char === ";" && (currentLine.trim() === "" || prevChar === "\n")) {
+      inComment = true;
     }
-    
-    return locations;
-  } catch (error) {
-    connection.console.error(`Error handling references: ${error}`);
-    return [];
+
+    if (inComment) {
+      if (char === "\n") {
+        lines.push(" ".repeat(indentLevel * indentSize) + currentLine.trim());
+        currentLine = "";
+        inComment = false;
+      } else {
+        currentLine += char;
+      }
+      continue;
+    }
+
+    // Handle parentheses
+    if (char === "(") {
+      if (currentLine.trim() !== "" && prevChar !== "(") {
+        lines.push(" ".repeat(indentLevel * indentSize) + currentLine.trim());
+        currentLine = "";
+      }
+
+      currentLine += char;
+      indentLevel++;
+
+      if (nextChar !== ")" && nextChar !== " ") {
+        lines.push(" ".repeat((indentLevel - 1) * indentSize) + currentLine.trim());
+        currentLine = "";
+      }
+    } else if (char === ")") {
+      indentLevel = Math.max(0, indentLevel - 1);
+      currentLine += char;
+
+      if (nextChar !== ")") {
+        lines.push(" ".repeat(indentLevel * indentSize) + currentLine.trim());
+        currentLine = "";
+      }
+    } else if (char === "\n" || char === "\r") {
+      if (currentLine.trim() !== "") {
+        lines.push(" ".repeat(indentLevel * indentSize) + currentLine.trim());
+        currentLine = "";
+      }
+    } else {
+      currentLine += char;
+    }
   }
-});
 
-connection.onDidChangeConfiguration(() => {
-  connection.console.log("Configuration changed");
-});
+  if (currentLine.trim() !== "") {
+    lines.push(" ".repeat(indentLevel * indentSize) + currentLine.trim());
+  }
 
-// Set up document tracking
+  return lines.filter(line => line.trim() !== "").join("\n") + "\n";
+}
+
+// Start listening
 documents.listen(connection);
-
-// Start the server
 connection.listen();
 
-// Handle uncaught errors to prevent crashes
-process.on("uncaughtException", (error) => {
-  connection.console.error(`Uncaught exception: ${error.message}`);
-});
-
-process.on("unhandledRejection", (reason, promise) => {
-  connection.console.error(`Unhandled rejection: ${reason}`);
-});
+console.error("=== SERVER LISTENING FOR REQUESTS ===");
